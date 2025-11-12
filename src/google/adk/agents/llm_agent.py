@@ -17,6 +17,7 @@ from __future__ import annotations
 import importlib
 import inspect
 import logging
+import os
 from typing import Any
 from typing import AsyncGenerator
 from typing import Awaitable
@@ -180,13 +181,24 @@ async def _convert_tool_union_to_tools(
   return await tool_union.get_tools_with_prefix(ctx)
 
 
+def _get_default_model() -> str:
+  """Gets the default model from environment variable if set."""
+  return os.environ.get('ADK_DEFAULT_MODEL', '')
+
+
 class LlmAgent(BaseAgent):
   """LLM-based Agent."""
 
-  model: Union[str, BaseLlm] = ''
+  model: Union[str, BaseLlm] = Field(default_factory=_get_default_model)
   """The model to use for the agent.
 
   When not set, the agent will inherit the model from its ancestor.
+  Can be configured via the ADK_DEFAULT_MODEL environment variable.
+
+  Example:
+    ```bash
+    export ADK_DEFAULT_MODEL="ollama/llama3"
+    ```
   """
 
   config_type: ClassVar[Type[BaseAgentConfig]] = LlmAgentConfig

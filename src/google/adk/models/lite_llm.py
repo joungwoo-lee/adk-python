@@ -973,11 +973,29 @@ class LiteLlm(BaseLlm):
   def __init__(self, model: str, **kwargs):
     """Initializes the LiteLlm class.
 
+    Supports environment variables for configuration:
+    - ADK_LLM_API_BASE: Base URL for the LLM API (e.g., http://localhost:11434
+      for Ollama)
+    - ADK_LLM_API_KEY: API key for authentication (if required)
+
     Args:
       model: The name of the LiteLlm model.
       **kwargs: Additional arguments to pass to the litellm completion api.
+        Common kwargs include:
+        - api_base: Base URL for the API (overrides ADK_LLM_API_BASE)
+        - api_key: API key (overrides ADK_LLM_API_KEY)
+        - drop_params: Whether to drop unsupported parameters
+        - timeout: Request timeout in seconds
     """
     drop_params = kwargs.pop("drop_params", None)
+
+    # Apply environment variable defaults if not explicitly provided
+    if "api_base" not in kwargs and os.environ.get("ADK_LLM_API_BASE"):
+      kwargs["api_base"] = os.environ.get("ADK_LLM_API_BASE")
+
+    if "api_key" not in kwargs and os.environ.get("ADK_LLM_API_KEY"):
+      kwargs["api_key"] = os.environ.get("ADK_LLM_API_KEY")
+
     super().__init__(model=model, **kwargs)
     # Warn if using Gemini via LiteLLM
     _warn_gemini_via_litellm(model)
@@ -1138,11 +1156,33 @@ class LiteLlm(BaseLlm):
   def supported_models(cls) -> list[str]:
     """Provides the list of supported models.
 
-    LiteLlm supports all models supported by litellm. We do not keep track of
-    these models here. So we return an empty list.
+    LiteLlm supports all models supported by litellm. Common patterns include:
+    - ollama/.* (Ollama local models)
+    - openai/.* (OpenAI compatible endpoints)
+    - anthropic/.* (Anthropic models via LiteLLM)
+    - together_ai/.* (Together AI models)
+    - huggingface/.* (HuggingFace models)
+    - replicate/.* (Replicate models)
+    - bedrock/.* (AWS Bedrock models)
+    - azure/.* (Azure OpenAI models)
+    - cohere/.* (Cohere models)
+    - vertex_ai/.* (Vertex AI models)
+    - palm/.* (PaLM models via LiteLLM)
 
     Returns:
-      A list of supported models.
+      A list of regex patterns for supported models.
     """
 
-    return []
+    return [
+        r"ollama/.*",
+        r"openai/.*",
+        r"anthropic/.*",
+        r"together_ai/.*",
+        r"huggingface/.*",
+        r"replicate/.*",
+        r"bedrock/.*",
+        r"azure/.*",
+        r"cohere/.*",
+        r"vertex_ai/.*",
+        r"palm/.*",
+    ]
