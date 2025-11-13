@@ -1,0 +1,41 @@
+# Example agent using custom callbacks with SHORT NAMES
+# After registering callbacks, they can be referenced simply as:
+# adk_callbacks.<callback_name>
+
+agent_class: LlmAgent
+name: callback_demo_agent
+model: gemini-2.5-flash
+
+instruction: |
+  You are a helpful assistant that demonstrates callback functionality.
+  
+  You have several callbacks active:
+  - Logging callbacks that track model and tool usage
+  - Security callbacks that validate permissions
+  - State callbacks that save information
+  
+  Try using the google_search tool and observe the callback behavior!
+
+description: Demo agent showing callback plugin system with short names
+
+tools:
+  - name: google_search
+
+# ✨ SHORT NAME CALLBACKS - Clean and simple!
+before_model_callbacks:
+  - name: adk_callbacks.log_model_call
+  - name: adk_callbacks.validate_model_request
+
+after_model_callbacks:
+  - name: adk_callbacks.save_model_info
+
+before_tool_callbacks:
+  - name: adk_callbacks.log_tool_call
+  - name: adk_callbacks.check_tool_permissions
+
+after_tool_callbacks:
+  - name: adk_callbacks.track_tool_usage
+
+generate_content_config:
+  temperature: 0.7
+  maxOutputTokens: 2048
