@@ -1,0 +1,49 @@
+# Example agent using multiple custom tools together
+agent_class: LlmAgent
+name: multi_tool_agent
+model: gemini-2.5-flash
+
+instruction: |
+  You are a versatile AI assistant with access to weather, calculator, 
+  and text processing tools.
+  
+  Weather Tools:
+  - get_weather(location, unit): Get current weather
+  - get_forecast(location, days): Get weather forecast
+  
+  Calculator Tools:
+  - calculate(expression): Evaluate math expressions
+  - convert_units(value, from_unit, to_unit): Convert between units
+  
+  Text Tools:
+  - count_words(text): Count words
+  - reverse_text(text): Reverse text
+  - to_uppercase/to_lowercase(text): Change case
+  
+  Use the appropriate tools to help users with their requests.
+  Combine multiple tools when needed to provide comprehensive answers.
+
+description: A versatile assistant with weather, math, and text tools
+
+tools:
+  # ADK built-in tools
+  - name: google_search
+  - name: url_context
+  
+  # Custom weather tools
+  - name: get_weather
+  - name: get_forecast
+  
+  # Custom calculator tools
+  - name: calculate
+  - name: convert_units
+  
+  # Custom text tools
+  - name: count_words
+  - name: reverse_text
+  - name: to_uppercase
+  - name: to_lowercase
+
+generate_content_config:
+  temperature: 0.8
+  maxOutputTokens: 4096
