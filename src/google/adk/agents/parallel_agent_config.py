@@ -28,7 +28,7 @@ class ParallelAgentConfig(BaseAgentConfig):
   """The config for the YAML schema of a ParallelAgent."""
 
   model_config = ConfigDict(
-      extra="forbid",
+      extra="ignore",
   )
 
   agent_class: str = Field(

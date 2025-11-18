@@ -28,7 +28,7 @@ class SequentialAgentConfig(BaseAgentConfig):
   """The config for the YAML schema of a SequentialAgent."""
 
   model_config = ConfigDict(
-      extra="forbid",
+      extra="ignore",
   )
 
   agent_class: str = Field(

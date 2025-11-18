@@ -30,7 +30,7 @@ class LoopAgentConfig(BaseAgentConfig):
   """The config for the YAML schema of a LoopAgent."""
 
   model_config = ConfigDict(
-      extra='forbid',
+      extra='ignore',
   )
 
   agent_class: str = Field(
