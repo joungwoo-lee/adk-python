@@ -16,8 +16,11 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import model_validator
 
 from ..utils.feature_decorator import experimental
 from .base_agent_config import BaseAgentConfig
@@ -37,3 +40,24 @@ class ParallelAgentConfig(BaseAgentConfig):
           "The value is used to uniquely identify the ParallelAgent class."
       ),
   )
+
+  @model_validator(mode='before')
+  @classmethod
+  def strip_workflow_agent_fields(cls, data: Any) -> Any:
+    """Remove fields that workflow agents should not have.
+
+    ParallelAgent orchestrates sub-agents and should not define model, tools,
+    or instruction fields. This validator automatically removes these fields
+    if present in the input data (e.g., from YAML files).
+
+    Args:
+      data: The input data dictionary from YAML or other sources.
+
+    Returns:
+      The cleaned data dictionary with workflow-incompatible fields removed.
+    """
+    if isinstance(data, dict):
+      # Remove fields that are not applicable to workflow agents
+      for field in ('model', 'tools', 'instruction'):
+        data.pop(field, None)
+    return data
