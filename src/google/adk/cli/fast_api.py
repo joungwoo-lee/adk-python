@@ -33,6 +33,7 @@ from opentelemetry.sdk.trace import export
 from opentelemetry.sdk.trace import TracerProvider
 from starlette.types import Lifespan
 from watchdog.observers import Observer
+import yaml
 
 from ..artifacts.in_memory_artifact_service import InMemoryArtifactService
 from ..auth.credential_service.in_memory_credential_service import InMemoryCredentialService
@@ -50,6 +51,45 @@ from .utils.agent_change_handler import AgentChangeEventHandler
 from .utils.agent_loader import AgentLoader
 
 logger = logging.getLogger("google_adk." + __name__)
+
+
+def _load_visual_builder_patch() -> None:
+  """Load visual builder patch if available.
+  
+  Looks for .adk_visual_forcepatch directory in the workspace root
+  and loads the patch_adk_builder_model.py if it exists.
+  """
+  try:
+    workspace_root = Path.cwd()
+    patch_dir = workspace_root / ".adk_visual_forcepatch"
+    patch_file = patch_dir / "patch_adk_builder_model.py"
+    
+    if patch_file.exists():
+      logger.info("Loading visual builder patch from %s", patch_dir)
+      
+      # Add patch directory to sys.path temporarily
+      patch_dir_str = str(patch_dir)
+      if patch_dir_str not in sys.path:
+        sys.path.insert(0, patch_dir_str)
+      
+      # Import the patch module (this will auto-execute the patches)
+      import patch_adk_builder_model  # noqa: F401
+      
+      logger.info(
+          "Visual builder patch loaded successfully from %s", 
+          patch_file
+      )
+    else:
+      logger.debug(
+          "No visual builder patch found at %s", 
+          patch_file
+      )
+  except Exception as e:
+    logger.warning(
+        "Failed to load visual builder patch: %s", 
+        e, 
+        exc_info=True
+    )
 
 
 def get_fast_api_app(
@@ -74,6 +114,9 @@ def get_fast_api_app(
     logo_text: Optional[str] = None,
     logo_image_url: Optional[str] = None,
 ) -> FastAPI:
+  
+  # Load visual builder patch if available
+  _load_visual_builder_patch()
 
   # Set up eval managers.
   if eval_storage_uri:
@@ -211,6 +254,61 @@ def get_fast_api_app(
       **extra_fast_api_args,
   )
 
+  def _remove_model_field_from_yaml(file_path: str) -> None:
+    """Remove model field from ParallelAgent, LoopAgent, SequentialAgent YAMLs.
+    
+    Args:
+      file_path: Path to the YAML file to process.
+    """
+    try:
+      with open(file_path, 'r', encoding='utf-8') as f:
+        data = yaml.safe_load(f)
+      
+      if not data or not isinstance(data, dict):
+        return
+      
+      # Agent types that should not have model field
+      agent_types_without_model = {
+          'ParallelAgent', 
+          'LoopAgent', 
+          'SequentialAgent'
+      }
+      
+      def remove_model_recursive(obj):
+        """Recursively remove model field from agent configs."""
+        if not isinstance(obj, dict):
+          return
+        
+        # Check if this is an agent config with agent_class
+        agent_class = obj.get('agent_class', '')
+        if agent_class in agent_types_without_model and 'model' in obj:
+          logger.info(
+              "Removing unnecessary 'model' field from %s in %s", 
+              agent_class, 
+              file_path
+          )
+          del obj['model']
+        
+        # Recursively process sub_agents
+        if 'sub_agents' in obj and isinstance(obj['sub_agents'], list):
+          for sub_agent in obj['sub_agents']:
+            remove_model_recursive(sub_agent)
+      
+      # Process the main agent and all sub-agents
+      remove_model_recursive(data)
+      
+      # Write back the cleaned YAML
+      with open(file_path, 'w', encoding='utf-8') as f:
+        yaml.dump(
+            data, 
+            f, 
+            allow_unicode=True, 
+            default_flow_style=False,
+            sort_keys=False
+        )
+    except Exception as e:
+      logger.warning("Failed to clean model field from %s: %s", file_path, e)
+
   @app.post("/builder/save", response_model_exclude_none=True)
   async def builder_build(
       files: list[UploadFile], tmp: Optional[bool] = False
@@ -230,6 +328,10 @@ def get_fast_api_app(
           file_path = os.path.join(agent_dir, filename)
           with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
+          
+          # Clean model field from YAML files
+          if filename.endswith('.yaml') or filename.endswith('.yml'):
+            _remove_model_field_from_yaml(file_path)
 
         else:
           source_dir = os.path.join(agent_dir, "tmp/" + agent_name)
@@ -242,6 +344,9 @@ def get_fast_api_app(
             # Check if the item is a file
             elif os.path.isfile(source_item):
               shutil.copy2(source_item, destination_item)
+              # Clean model field from copied YAML files
+              if item.endswith('.yaml') or item.endswith('.yml'):
+                _remove_model_field_from_yaml(destination_item)
       except Exception as e:
         logger.exception("Error in builder_build: %s", e)
         return False
