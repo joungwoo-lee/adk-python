@@ -1,17 +1,51 @@
 # ADK Custom LLM Patch - 자동 설치 패키지
 
-Google ADK의 Gemini 모델을 커스텀 LiteLLM으로 자동 교체하는 패치입니다.
+Google ADK의 Gemini 모델을 커스텀 LiteLLM으로 자동 교체하고, 비주얼 빌더에서 생성된 YAML 파일을 자동으로 정리하는 패치입니다.
 
 **도커 컨테이너 내부 실행 방식**
 
-## 🎯 교체되는 모델
+## 🎯 주요 기능
 
+### 1. Gemini 모델 자동 교체
 이 패치는 **Flash와 Pro 둘 다** 바꿉니다!
 
 정확히는 **"gemini"가 들어간 모든 모델**을 다음으로 교체합니다:
 ```
 openai/gpt-oss:20b (http://172.21.137.193:11434/v1)
 ```
+
+### 2. 🆕 YAML 자동 정리 (Parallel/Loop/Sequential Agent)
+비주얼 빌더로 `ParallelAgent`, `LoopAgent`, `SequentialAgent`를 생성할 때 불필요한 `model` 필드가 자동으로 제거됩니다!
+
+**문제 상황:**
+```yaml
+# ❌ 비주얼 빌더가 생성한 잘못된 YAML
+agent_class: ParallelAgent
+name: my_parallel
+model: gemini-2.5-flash  # ← 이 필드 때문에 Pydantic 에러 발생!
+sub_agents:
+  - agent_class: LlmAgent
+    name: agent1
+    model: gemini-2.5-flash
+```
+
+**자동 정리 후:**
+```yaml
+# ✅ 패치가 자동으로 정리한 올바른 YAML
+agent_class: ParallelAgent
+name: my_parallel
+# model 필드 제거됨!
+sub_agents:
+  - agent_class: LlmAgent
+    name: agent1
+    model: gemini-2.5-flash  # LlmAgent는 model 유지
+```
+
+**지원되는 에이전트:**
+- ✅ `ParallelAgent` - model 필드 자동 제거
+- ✅ `LoopAgent` - model 필드 자동 제거
+- ✅ `SequentialAgent` - model 필드 자동 제거
+- ℹ️ `LlmAgent` - model 필드 유지 (필수 필드)
 
 ### 감지 로직
 세 가지 패치 지점에서 gemini 모델을 감지합니다:
@@ -38,7 +72,7 @@ openai/gpt-oss:20b (http://172.21.137.193:11434/v1)
 - ✓ `gemini-1.5-pro`
 - ✓ 기타 모든 gemini 변형
 
-### 세 가지 경로로 교체
+### 네 가지 패치 지점
 
 1. **Agent Builder Assistant** (ADK Web UI 빌트인)
    - `AgentBuilderAssistant.create_agent()` 패치
@@ -52,6 +86,11 @@ openai/gpt-oss:20b (http://172.21.137.193:11434/v1)
    - `LLMRegistry.new_llm()` 패치
    - YAML에서 로드된 `model: gemini-*` 문자열이 실제 모델 인스턴스로 변환될 때
    - 생성된 에이전트와 서브에이전트의 모든 gemini 모델 요청 가로채기
+
+4. **🆕 YAML 파일 저장 자동 정리**
+   - Python `builtins.open()` 함수 패치
+   - YAML 파일 저장 시 불필요한 model 필드 자동 제거
+   - ParallelAgent, LoopAgent, SequentialAgent의 Pydantic 에러 방지
 
 ### 교체 결과
 
@@ -203,10 +242,18 @@ print(f'Is LiteLlm: {isinstance(agent.model, LiteLlm)}')
   - Agent Builder Assistant: ✓
   - LlmAgent (YAML support): ✓
   - LLMRegistry (전체 경로): ✓
+  - YAML 자동 정리 (model 제거): ✓
   Model: openai/gpt-oss:20b
   API Base: http://172.21.137.193:11434/v1
 Model type: LiteLlm
 Is LiteLlm: True
+```
+
+**비주얼 빌더 사용 시:**
+```
+🧹 Cleaning: Removing 'model' field from ParallelAgent in root_agent.yaml
+🧹 Cleaning: Removing 'model' field from LoopAgent in sub_agent.yaml
+✅ Cleaned YAML file: root_agent.yaml
 ```
 
 ---

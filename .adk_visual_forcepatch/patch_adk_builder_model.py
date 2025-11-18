@@ -361,18 +361,153 @@ def patch_llm_registry():
     return False
 
 
+def patch_yaml_save_for_builder():
+  """Patch YAML file writing to remove model field from agent configs.
+  
+  This patches file operations to automatically clean up model fields
+  from ParallelAgent, LoopAgent, and SequentialAgent configurations when
+  YAML files are saved through the visual builder.
+  
+  Returns:
+    bool: 패치 성공 여부
+  """
+  try:
+    import yaml
+    from pathlib import Path
+    import builtins
+    
+    # Agent types that should not have model field
+    AGENT_TYPES_WITHOUT_MODEL = {
+        'ParallelAgent',
+        'LoopAgent', 
+        'SequentialAgent'
+    }
+    
+    # Store original open function
+    _original_open = builtins.open
+    
+    def remove_model_field_from_yaml(file_path: str) -> None:
+      """Remove model field from agent YAML configs recursively."""
+      try:
+        with _original_open(file_path, 'r', encoding='utf-8') as f:
+          data = yaml.safe_load(f)
+        
+        if not data or not isinstance(data, dict):
+          return
+        
+        modified = False
+        
+        def remove_model_recursive(obj):
+          """Recursively remove model field from agent configs."""
+          nonlocal modified
+          if not isinstance(obj, dict):
+            return
+          
+          # Check if this is an agent config with agent_class
+          agent_class = obj.get('agent_class', '')
+          if agent_class in AGENT_TYPES_WITHOUT_MODEL and 'model' in obj:
+            logger.info(
+                "🧹 Cleaning: Removing 'model' field from %s in %s",
+                agent_class,
+                Path(file_path).name
+            )
+            del obj['model']
+            modified = True
+          
+          # Recursively process sub_agents
+          if 'sub_agents' in obj and isinstance(obj['sub_agents'], list):
+            for sub_agent in obj['sub_agents']:
+              remove_model_recursive(sub_agent)
+        
+        # Process the main agent and all sub-agents
+        remove_model_recursive(data)
+        
+        # Write back the cleaned YAML only if modified
+        if modified:
+          with _original_open(file_path, 'w', encoding='utf-8') as f:
+            yaml.dump(
+                data,
+                f,
+                allow_unicode=True,
+                default_flow_style=False,
+                sort_keys=False
+            )
+          logger.info("✅ Cleaned YAML file: %s", Path(file_path).name)
+      except Exception as e:
+        logger.debug("Could not clean %s: %s", file_path, e)
+    
+    def patched_open(file, mode='r', *args, **kwargs):
+      """Patched open function that cleans YAML files after writing."""
+      # Call original open
+      file_obj = _original_open(file, mode, *args, **kwargs)
+      
+      # Check if this is a write mode for a YAML file
+      if isinstance(file, (str, Path)):
+        file_path = str(file)
+        is_write_mode = 'w' in mode or 'a' in mode
+        is_yaml_file = file_path.endswith(('.yaml', '.yml'))
+        is_agent_yaml = (
+            is_yaml_file and 
+            ('tmp/' in file_path or 'root_agent' in file_path or 
+             any(x in file_path for x in ['parallel', 'loop', 'sequential']))
+        )
+        
+        if is_write_mode and is_agent_yaml:
+          # Return a wrapper that cleans the file after closing
+          class YamlFileWrapper:
+            def __init__(self, wrapped_file, path):
+              self._file = wrapped_file
+              self._path = path
+            
+            def __enter__(self):
+              return self._file.__enter__()
+            
+            def __exit__(self, *args):
+              result = self._file.__exit__(*args)
+              # Clean the YAML file after it's closed
+              try:
+                remove_model_field_from_yaml(self._path)
+              except Exception:
+                pass
+              return result
+            
+            def __getattr__(self, name):
+              return getattr(self._file, name)
+          
+          return YamlFileWrapper(file_obj, file_path)
+      
+      return file_obj
+    
+    # Apply the patch
+    builtins.open = patched_open
+    
+    logger.info("✅ YAML file save patch applied successfully")
+    return True
+    
+  except Exception as e:
+    logger.error("Failed to patch YAML file save: %s", e)
+    return False
+
+
 # 모듈 임포트 시 자동으로 패치 적용
 _PATCH_APPLIED_BUILDER = patch_agent_builder_assistant()
 _PATCH_APPLIED_LLM_AGENT = patch_llm_agent()
 _PATCH_APPLIED_REGISTRY = patch_llm_registry()
+_PATCH_APPLIED_YAML_CLEAN = patch_yaml_save_for_builder()
 
-_PATCH_APPLIED = _PATCH_APPLIED_BUILDER or _PATCH_APPLIED_LLM_AGENT or _PATCH_APPLIED_REGISTRY
+_PATCH_APPLIED = (
+    _PATCH_APPLIED_BUILDER or 
+    _PATCH_APPLIED_LLM_AGENT or 
+    _PATCH_APPLIED_REGISTRY or
+    _PATCH_APPLIED_YAML_CLEAN
+)
 
 if _PATCH_APPLIED:
   print(f"✓ ADK Gemini → 커스텀 LiteLlm 모델 패치 완료")
   print(f"  - Agent Builder Assistant: {'✓' if _PATCH_APPLIED_BUILDER else '✗'}")
   print(f"  - LlmAgent (YAML support): {'✓' if _PATCH_APPLIED_LLM_AGENT else '✗'}")
   print(f"  - LLMRegistry (전체 경로): {'✓' if _PATCH_APPLIED_REGISTRY else '✗'}")
+  print(f"  - YAML 자동 정리 (model 제거): {'✓' if _PATCH_APPLIED_YAML_CLEAN else '✗'}")
   print(f"  Model: {os.getenv('model')}")
   print(f"  API Base: {os.getenv('api_base')}")
 else:
