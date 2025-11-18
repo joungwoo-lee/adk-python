@@ -361,18 +361,139 @@ def patch_llm_registry():
     return False
 
 
+def patch_write_config_files():
+  """write_config_files를 패치하여 workflow 에이전트의 model 필드 강제 제거.
+
+  비주얼 빌더로 Parallel, Loop, Sequential 에이전트를 만들 때
+  불필요한 model 값이 YAML에 들어가는 것을 방지합니다.
+
+  Returns:
+    bool: 패치 성공 여부
+  """
+  try:
+    # pip으로 설치된 패키지 위치에서 임포트 시도 (ADK 1.18.0+)
+    try:
+      from google.adk.built_in_agents.adk_agent_builder_assistant.tools.write_config_files import (
+          _validate_single_config,
+      )
+      logger.info("pip 설치 패키지 (built_in_agents)에서 write_config_files 로드 성공")
+    except ImportError:
+      # 구 버전 경로 시도
+      try:
+        from google.adk.samples.adk_agent_builder_assistant.tools.write_config_files import (
+            _validate_single_config,
+        )
+        logger.info("pip 설치 패키지 (samples)에서 write_config_files 로드 성공")
+      except ImportError:
+        # 개발 환경 위치에서 임포트 (contributing/samples)
+        import sys
+        from pathlib import Path
+
+        # contributing/samples를 path에 추가
+        repo_root = Path(__file__).parent.parent
+        samples_path = repo_root / "contributing" / "samples"
+        if samples_path.exists():
+          sys.path.insert(0, str(samples_path))
+          logger.info("개발 환경 samples 경로 추가: %s", samples_path)
+
+        from adk_agent_builder_assistant.tools.write_config_files import (
+            _validate_single_config,
+        )
+        logger.info("개발 환경에서 write_config_files 로드 성공")
+
+    # 원본 함수 저장
+    original_validate_single_config = _validate_single_config
+
+    # workflow 에이전트 클래스 목록
+    WORKFLOW_AGENT_CLASSES = frozenset({
+        "SequentialAgent",
+        "ParallelAgent",
+        "LoopAgent",
+    })
+
+    def patched_validate_single_config(
+        file_path: str,
+        config_content: str,
+        project_folder_name: Optional[str] = None,
+    ):
+      """workflow 에이전트의 model 필드를 강제로 제거하는 패치된 버전."""
+      # 원본 함수 호출
+      result = original_validate_single_config(
+          file_path, config_content, project_folder_name
+      )
+
+      # validation이 성공한 경우에만 처리
+      if result.get("success", False):
+        parsed_config = result.get("_parsed_config")
+        if parsed_config:
+          agent_class = parsed_config.get("agent_class")
+
+          # workflow 에이전트인 경우 model 필드 제거
+          if agent_class in WORKFLOW_AGENT_CLASSES:
+            if "model" in parsed_config:
+              parsed_config.pop("model", None)
+              logger.info(
+                  "Workflow 에이전트 (%s)에서 model 필드 제거: %s",
+                  agent_class,
+                  file_path,
+              )
+
+              # 경고 메시지 추가
+              warnings = result.get("warnings", [])
+              agent_name = parsed_config.get("name", "unknown")
+              warnings.append(
+                  f"Workflow 에이전트 '{agent_name}' ({agent_class})에서 model"
+                  " 필드가 자동으로 제거되었습니다. Workflow 에이전트는 model을"
+                  " 정의하지 않습니다."
+              )
+              result["warnings"] = warnings
+
+      return result
+
+    # 패치 적용 - 모듈 찾기
+    try:
+      import google.adk.built_in_agents.adk_agent_builder_assistant.tools.write_config_files as module
+    except ImportError:
+      try:
+        import google.adk.samples.adk_agent_builder_assistant.tools.write_config_files as module
+      except ImportError:
+        import adk_agent_builder_assistant.tools.write_config_files as module
+
+    module._validate_single_config = patched_validate_single_config
+
+    logger.info(
+        "write_config_files 패치 성공 - "
+        "Workflow 에이전트의 model 필드가 자동으로 제거됩니다"
+    )
+    return True
+
+  except Exception as e:
+    logger.error("write_config_files 패치 실패: %s", e)
+    return False
+
+
 # 모듈 임포트 시 자동으로 패치 적용
 _PATCH_APPLIED_BUILDER = patch_agent_builder_assistant()
 _PATCH_APPLIED_LLM_AGENT = patch_llm_agent()
 _PATCH_APPLIED_REGISTRY = patch_llm_registry()
+_PATCH_APPLIED_WRITE_CONFIG = patch_write_config_files()
 
-_PATCH_APPLIED = _PATCH_APPLIED_BUILDER or _PATCH_APPLIED_LLM_AGENT or _PATCH_APPLIED_REGISTRY
+_PATCH_APPLIED = (
+    _PATCH_APPLIED_BUILDER
+    or _PATCH_APPLIED_LLM_AGENT
+    or _PATCH_APPLIED_REGISTRY
+    or _PATCH_APPLIED_WRITE_CONFIG
+)
 
 if _PATCH_APPLIED:
   print(f"✓ ADK Gemini → 커스텀 LiteLlm 모델 패치 완료")
   print(f"  - Agent Builder Assistant: {'✓' if _PATCH_APPLIED_BUILDER else '✗'}")
   print(f"  - LlmAgent (YAML support): {'✓' if _PATCH_APPLIED_LLM_AGENT else '✗'}")
   print(f"  - LLMRegistry (전체 경로): {'✓' if _PATCH_APPLIED_REGISTRY else '✗'}")
+  print(
+      f"  - write_config_files (Workflow 에이전트):"
+      f" {'✓' if _PATCH_APPLIED_WRITE_CONFIG else '✗'}"
+  )
   print(f"  Model: {os.getenv('model')}")
   print(f"  API Base: {os.getenv('api_base')}")
 else:

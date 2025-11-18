@@ -38,7 +38,7 @@ openai/gpt-oss:20b (http://172.21.137.193:11434/v1)
 - ✓ `gemini-1.5-pro`
 - ✓ 기타 모든 gemini 변형
 
-### 세 가지 경로로 교체
+### 네 가지 경로로 교체
 
 1. **Agent Builder Assistant** (ADK Web UI 빌트인)
    - `AgentBuilderAssistant.create_agent()` 패치
@@ -52,6 +52,11 @@ openai/gpt-oss:20b (http://172.21.137.193:11434/v1)
    - `LLMRegistry.new_llm()` 패치
    - YAML에서 로드된 `model: gemini-*` 문자열이 실제 모델 인스턴스로 변환될 때
    - 생성된 에이전트와 서브에이전트의 모든 gemini 모델 요청 가로채기
+
+4. **write_config_files (Workflow 에이전트)** 🆕
+   - `write_config_files._validate_single_config()` 패치
+   - 비주얼 빌더로 Parallel, Loop, Sequential 에이전트 생성 시
+   - 불필요한 model 필드를 자동으로 제거하여 Pydantic 에러 방지
 
 ### 교체 결과
 
@@ -166,7 +171,13 @@ EOF"
    - YAML 파일의 `model: gemini-*`가 실제 모델 인스턴스로 변환되는 시점을 가로챔
    - 생성된 에이전트와 모든 서브에이전트의 gemini 모델 요청 처리
 
-4. **자동 로드**
+4. **write_config_files 패치** 🆕
+   - `write_config_files._validate_single_config()` 메서드 교체
+   - 비주얼 빌더로 Workflow 에이전트 (Parallel, Loop, Sequential) 생성 시
+   - YAML 저장 전에 불필요한 model 필드를 자동으로 제거
+   - Pydantic ValidationError 방지
+
+5. **자동 로드**
    - `sitecustomize.py`가 Python 시작 시 자동 실행
    - 환경 변수 확인 후 패치 적용
 
@@ -203,6 +214,7 @@ print(f'Is LiteLlm: {isinstance(agent.model, LiteLlm)}')
   - Agent Builder Assistant: ✓
   - LlmAgent (YAML support): ✓
   - LLMRegistry (전체 경로): ✓
+  - write_config_files (Workflow 에이전트): ✓
   Model: openai/gpt-oss:20b
   API Base: http://172.21.137.193:11434/v1
 Model type: LiteLlm

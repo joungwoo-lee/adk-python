@@ -98,6 +98,39 @@ from google.adk.models.lite_llm import LiteLlm
 agent = LlmAgent(name='test', model='gemini-2.5-flash', instruction='test')
 print('SUCCESS: LlmAgent 패치 작동' if isinstance(agent.model, LiteLlm) else 'FAILED')
 "
+
+# 도커 안에서 테스트 3: write_config_files (Workflow 에이전트) 🆕
+docker exec -it <컨테이너_ID> python -c "
+import yaml
+# 패치 임포트하여 활성화
+import patch_adk_builder_model
+# write_config_files 임포트
+try:
+    from google.adk.built_in_agents.adk_agent_builder_assistant.tools.write_config_files import _validate_single_config
+except ImportError:
+    try:
+        from google.adk.samples.adk_agent_builder_assistant.tools.write_config_files import _validate_single_config
+    except ImportError:
+        from adk_agent_builder_assistant.tools.write_config_files import _validate_single_config
+
+# Workflow 에이전트 YAML (model 필드 포함)
+test_yaml = '''
+agent_class: ParallelAgent
+name: test_parallel
+model: gemini-2.5-flash
+description: Test parallel agent
+sub_agents: []
+'''
+
+# 검증 실행
+result = _validate_single_config('test.yaml', test_yaml, None)
+if result.get('success'):
+    parsed = result.get('_parsed_config', {})
+    has_model = 'model' in parsed
+    print('SUCCESS: model 필드가 제거되었습니다' if not has_model else 'FAILED: model 필드가 여전히 존재합니다')
+else:
+    print('FAILED: 검증 실패')
+"
 ```
 
 ---
