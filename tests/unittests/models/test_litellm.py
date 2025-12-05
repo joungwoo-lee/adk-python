@@ -18,12 +18,18 @@ from unittest.mock import Mock
 import warnings
 
 from google.adk.models.lite_llm import _content_to_message_param
+from google.adk.models.lite_llm import _FILE_ID_REQUIRED_PROVIDERS
 from google.adk.models.lite_llm import _FINISH_REASON_MAPPING
 from google.adk.models.lite_llm import _function_declaration_to_tool_param
 from google.adk.models.lite_llm import _get_completion_inputs
 from google.adk.models.lite_llm import _get_content
+from google.adk.models.lite_llm import _get_provider_from_model
 from google.adk.models.lite_llm import _message_to_generate_content_response
 from google.adk.models.lite_llm import _model_response_to_chunk
+from google.adk.models.lite_llm import _model_response_to_generate_content_response
+from google.adk.models.lite_llm import _parse_tool_calls_from_text
+from google.adk.models.lite_llm import _schema_to_dict
+from google.adk.models.lite_llm import _split_message_content_and_tool_calls
 from google.adk.models.lite_llm import _to_litellm_response_format
 from google.adk.models.lite_llm import _to_litellm_role
 from google.adk.models.lite_llm import FunctionChunk
@@ -33,6 +39,7 @@ from google.adk.models.lite_llm import TextChunk
 from google.adk.models.lite_llm import UsageMetadataChunk
 from google.adk.models.llm_request import LlmRequest
 from google.genai import types
+import litellm
 from litellm import ChatCompletionAssistantMessage
 from litellm import ChatCompletionMessageToolCall
 from litellm import Function
@@ -108,12 +115,6 @@ FILE_BYTES_TEST_CASES = [
         "application/json",
         "data:application/json;base64,eyJoZWxsbyI6IndvcmxkIn0=",
         id="json",
-    ),
-    pytest.param(
-        b"hello world",
-        "text/plain",
-        "data:text/plain;base64,aGVsbG8gd29ybGQ=",
-        id="txt",
     ),
 ]
 
@@ -230,12 +231,12 @@ class _ModelDumpOnly:
     return self._schema
 
 
-def test_get_completion_inputs_formats_pydantic_schema_for_litellm():
+async def test_get_completion_inputs_formats_pydantic_schema_for_litellm():
   llm_request = LlmRequest(
       config=types.GenerateContentConfig(response_schema=_StructuredOutput)
   )
 
-  _, _, response_format, _ = _get_completion_inputs(llm_request)
+  _, _, response_format, _ = await _get_completion_inputs(llm_request)
 
   assert response_format == {
       "type": "json_object",
@@ -287,6 +288,28 @@ def test_to_litellm_response_format_handles_genai_schema_instance():
   assert formatted["response_schema"] == schema_instance.model_dump(
       exclude_none=True, mode="json"
   )
+
+
+def test_schema_to_dict_filters_none_enum_values():
+  # Use model_construct to bypass strict enum validation.
+  top_level_schema = types.Schema.model_construct(
+      type=types.Type.STRING,
+      enum=["ACTIVE", None, "INACTIVE"],
+  )
+  nested_schema = types.Schema.model_construct(
+      type=types.Type.OBJECT,
+      properties={
+          "status": types.Schema.model_construct(
+              type=types.Type.STRING, enum=["READY", None, "DONE"]
+          ),
+      },
+  )
+
+  assert _schema_to_dict(top_level_schema)["enum"] == ["ACTIVE", "INACTIVE"]
+  assert _schema_to_dict(nested_schema)["properties"]["status"]["enum"] == [
+      "READY",
+      "DONE",
+  ]
 
 
 MULTIPLE_FUNCTION_CALLS_STREAM = [
@@ -1175,7 +1198,7 @@ async def test_generate_content_async_with_system_instruction(
 
   _, kwargs = mock_acompletion.call_args
   assert kwargs["model"] == "test_model"
-  assert kwargs["messages"][0]["role"] == "developer"
+  assert kwargs["messages"][0]["role"] == "system"
   assert kwargs["messages"][0]["content"] == "Test system instruction"
   assert kwargs["messages"][1]["role"] == "user"
   assert kwargs["messages"][1]["content"] == "Test prompt"
@@ -1273,17 +1296,19 @@ async def test_generate_content_async_with_usage_metadata(
   mock_acompletion.assert_called_once()
 
 
-def test_content_to_message_param_user_message():
+@pytest.mark.asyncio
+async def test_content_to_message_param_user_message():
   content = types.Content(
       role="user", parts=[types.Part.from_text(text="Test prompt")]
   )
-  message = _content_to_message_param(content)
+  message = await _content_to_message_param(content)
   assert message["role"] == "user"
   assert message["content"] == "Test prompt"
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("file_uri,mime_type", FILE_URI_TEST_CASES)
-def test_content_to_message_param_user_message_with_file_uri(
+async def test_content_to_message_param_user_message_with_file_uri(
     file_uri, mime_type
 ):
   file_part = types.Part.from_uri(file_uri=file_uri, mime_type=mime_type)
@@ -1295,7 +1320,7 @@ def test_content_to_message_param_user_message_with_file_uri(
       ],
   )
 
-  message = _content_to_message_param(content)
+  message = await _content_to_message_param(content)
   assert message["role"] == "user"
   assert isinstance(message["content"], list)
   assert message["content"][0]["type"] == "text"
@@ -1305,8 +1330,9 @@ def test_content_to_message_param_user_message_with_file_uri(
   assert "format" not in message["content"][1]["file"]
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("file_uri,mime_type", FILE_URI_TEST_CASES)
-def test_content_to_message_param_user_message_file_uri_only(
+async def test_content_to_message_param_user_message_file_uri_only(
     file_uri, mime_type
 ):
   file_part = types.Part.from_uri(file_uri=file_uri, mime_type=mime_type)
@@ -1317,7 +1343,7 @@ def test_content_to_message_param_user_message_file_uri_only(
       ],
   )
 
-  message = _content_to_message_param(content)
+  message = await _content_to_message_param(content)
   assert message["role"] == "user"
   assert isinstance(message["content"], list)
   assert message["content"][0]["type"] == "file"
@@ -1325,7 +1351,8 @@ def test_content_to_message_param_user_message_file_uri_only(
   assert "format" not in message["content"][0]["file"]
 
 
-def test_content_to_message_param_multi_part_function_response():
+@pytest.mark.asyncio
+async def test_content_to_message_param_multi_part_function_response():
   part1 = types.Part.from_function_response(
       name="function_one",
       response={"result": "result_one"},
@@ -1342,7 +1369,7 @@ def test_content_to_message_param_multi_part_function_response():
       role="tool",
       parts=[part1, part2],
   )
-  messages = _content_to_message_param(content)
+  messages = await _content_to_message_param(content)
   assert isinstance(messages, list)
   assert len(messages) == 2
 
@@ -1355,16 +1382,55 @@ def test_content_to_message_param_multi_part_function_response():
   assert messages[1]["content"] == '{"value": 123}'
 
 
-def test_content_to_message_param_assistant_message():
+@pytest.mark.asyncio
+async def test_content_to_message_param_function_response_preserves_string():
+  """Tests that string responses are used directly without double-serialization.
+
+  The google.genai FunctionResponse.response field is typed as dict, but
+  _content_to_message_param defensively handles string responses to avoid
+  double-serialization. This test verifies that behavior by mocking a
+  function_response with a string response attribute.
+  """
+  response_payload = '{"type": "files", "count": 2}'
+
+  # Create a Part with a dict response, then mock the response to be a string
+  # to simulate edge cases where response might be set directly as a string
+  part = types.Part.from_function_response(
+      name="list_files",
+      response={"placeholder": "will be mocked"},
+  )
+
+  # Mock the response attribute to return a string
+  # Using Mock without spec_set to allow setting response to a string,
+  # which simulates the edge case we're testing
+  mock_function_response = Mock(spec=types.FunctionResponse)
+  mock_function_response.response = response_payload
+  mock_function_response.id = "tool_call_1"
+  part.function_response = mock_function_response
+
+  content = types.Content(
+      role="tool",
+      parts=[part],
+  )
+  message = await _content_to_message_param(content)
+
+  assert message["role"] == "tool"
+  assert message["tool_call_id"] == "tool_call_1"
+  assert message["content"] == response_payload
+
+
+@pytest.mark.asyncio
+async def test_content_to_message_param_assistant_message():
   content = types.Content(
       role="assistant", parts=[types.Part.from_text(text="Test response")]
   )
-  message = _content_to_message_param(content)
+  message = await _content_to_message_param(content)
   assert message["role"] == "assistant"
   assert message["content"] == "Test response"
 
 
-def test_content_to_message_param_function_call():
+@pytest.mark.asyncio
+async def test_content_to_message_param_function_call():
   content = types.Content(
       role="assistant",
       parts=[
@@ -1375,7 +1441,7 @@ def test_content_to_message_param_function_call():
       ],
   )
   content.parts[1].function_call.id = "test_tool_call_id"
-  message = _content_to_message_param(content)
+  message = await _content_to_message_param(content)
   assert message["role"] == "assistant"
   assert message["content"] == "test response"
 
@@ -1386,7 +1452,8 @@ def test_content_to_message_param_function_call():
   assert tool_call["function"]["arguments"] == '{"test_arg": "test_value"}'
 
 
-def test_content_to_message_param_multipart_content():
+@pytest.mark.asyncio
+async def test_content_to_message_param_multipart_content():
   """Test handling of multipart content where final_content is a list with text objects."""
   content = types.Content(
       role="assistant",
@@ -1395,7 +1462,7 @@ def test_content_to_message_param_multipart_content():
           types.Part.from_bytes(data=b"test_image_data", mime_type="image/png"),
       ],
   )
-  message = _content_to_message_param(content)
+  message = await _content_to_message_param(content)
   assert message["role"] == "assistant"
   # When content is a list and the first element is a text object with type "text",
   # it should extract the text (for providers like ollama_chat that don't handle lists well)
@@ -1404,23 +1471,26 @@ def test_content_to_message_param_multipart_content():
   assert message["tool_calls"] is None
 
 
-def test_content_to_message_param_single_text_object_in_list():
+@pytest.mark.asyncio
+async def test_content_to_message_param_single_text_object_in_list(mocker):
   """Test extraction of text from single text object in list (for ollama_chat compatibility)."""
-  from unittest.mock import patch
+  from google.adk.models import lite_llm
 
   # Mock _get_content to return a list with single text object
-  with patch("google.adk.models.lite_llm._get_content") as mock_get_content:
-    mock_get_content.return_value = [{"type": "text", "text": "single text"}]
+  async def mock_get_content(*args, **kwargs):
+    return [{"type": "text", "text": "single text"}]
 
-    content = types.Content(
-        role="assistant",
-        parts=[types.Part.from_text(text="single text")],
-    )
-    message = _content_to_message_param(content)
-    assert message["role"] == "assistant"
-    # Should extract the text from the single text object
-    assert message["content"] == "single text"
-    assert message["tool_calls"] is None
+  mocker.patch.object(lite_llm, "_get_content", side_effect=mock_get_content)
+
+  content = types.Content(
+      role="assistant",
+      parts=[types.Part.from_text(text="single text")],
+  )
+  message = await _content_to_message_param(content)
+  assert message["role"] == "assistant"
+  # Should extract the text from the single text object
+  assert message["content"] == "single text"
+  assert message["tool_calls"] is None
 
 
 def test_message_to_generate_content_response_text():
@@ -1458,6 +1528,25 @@ def test_message_to_generate_content_response_tool_call():
   assert response.content.parts[0].function_call.id == "test_tool_call_id"
 
 
+def test_message_to_generate_content_response_inline_tool_call_text():
+  message = ChatCompletionAssistantMessage(
+      role="assistant",
+      content=(
+          '{"id":"inline_call","name":"get_current_time",'
+          '"arguments":{"timezone_str":"Asia/Taipei"}} <|im_end|>system'
+      ),
+  )
+
+  response = _message_to_generate_content_response(message)
+  assert len(response.content.parts) == 2
+  text_part = response.content.parts[0]
+  tool_part = response.content.parts[1]
+  assert text_part.text == "<|im_end|>system"
+  assert tool_part.function_call.name == "get_current_time"
+  assert tool_part.function_call.args == {"timezone_str": "Asia/Taipei"}
+  assert tool_part.function_call.id == "inline_call"
+
+
 def test_message_to_generate_content_response_with_model():
   message = ChatCompletionAssistantMessage(
       role="assistant",
@@ -1471,17 +1560,149 @@ def test_message_to_generate_content_response_with_model():
   assert response.model_version == "gemini-2.5-pro"
 
 
-def test_get_content_text():
+def test_message_to_generate_content_response_reasoning_content():
+  message = {
+      "role": "assistant",
+      "content": "Visible text",
+      "reasoning_content": "Hidden chain",
+  }
+  response = _message_to_generate_content_response(message)
+
+  assert len(response.content.parts) == 2
+  thought_part = response.content.parts[0]
+  text_part = response.content.parts[1]
+  assert thought_part.text == "Hidden chain"
+  assert thought_part.thought is True
+  assert text_part.text == "Visible text"
+
+
+def test_model_response_to_generate_content_response_reasoning_content():
+  model_response = ModelResponse(
+      model="thinking-model",
+      choices=[{
+          "message": {
+              "role": "assistant",
+              "content": "Answer",
+              "reasoning_content": "Step-by-step",
+          },
+          "finish_reason": "stop",
+      }],
+  )
+
+  response = _model_response_to_generate_content_response(model_response)
+
+  assert response.content.parts[0].text == "Step-by-step"
+  assert response.content.parts[0].thought is True
+  assert response.content.parts[1].text == "Answer"
+
+
+def test_parse_tool_calls_from_text_multiple_calls():
+  text = (
+      '{"name":"alpha","arguments":{"value":1}}\n'
+      "Some filler text "
+      '{"id":"custom","name":"beta","arguments":{"timezone":"Asia/Taipei"}} '
+      "ignored suffix"
+  )
+  tool_calls, remainder = _parse_tool_calls_from_text(text)
+  assert len(tool_calls) == 2
+  assert tool_calls[0].function.name == "alpha"
+  assert json.loads(tool_calls[0].function.arguments) == {"value": 1}
+  assert tool_calls[1].id == "custom"
+  assert tool_calls[1].function.name == "beta"
+  assert json.loads(tool_calls[1].function.arguments) == {
+      "timezone": "Asia/Taipei"
+  }
+  assert remainder == "Some filler text  ignored suffix"
+
+
+def test_parse_tool_calls_from_text_invalid_json_returns_remainder():
+  text = 'Leading {"unused": "payload"} trailing text'
+  tool_calls, remainder = _parse_tool_calls_from_text(text)
+  assert tool_calls == []
+  assert remainder == 'Leading {"unused": "payload"} trailing text'
+
+
+def test_split_message_content_and_tool_calls_inline_text():
+  message = {
+      "role": "assistant",
+      "content": (
+          'Intro {"name":"alpha","arguments":{"value":1}} trailing content'
+      ),
+  }
+  content, tool_calls = _split_message_content_and_tool_calls(message)
+  assert content == "Intro  trailing content"
+  assert len(tool_calls) == 1
+  assert tool_calls[0].function.name == "alpha"
+  assert json.loads(tool_calls[0].function.arguments) == {"value": 1}
+
+
+def test_split_message_content_prefers_existing_structured_calls():
+  tool_call = ChatCompletionMessageToolCall(
+      type="function",
+      id="existing",
+      function=Function(
+          name="existing_call",
+          arguments='{"arg": "value"}',
+      ),
+  )
+  message = {
+      "role": "assistant",
+      "content": "ignored",
+      "tool_calls": [tool_call],
+  }
+  content, tool_calls = _split_message_content_and_tool_calls(message)
+  assert content == "ignored"
+  assert tool_calls == [tool_call]
+
+
+@pytest.mark.asyncio
+async def test_get_content_text():
   parts = [types.Part.from_text(text="Test text")]
-  content = _get_content(parts)
+  content = await _get_content(parts)
   assert content == "Test text"
 
 
-def test_get_content_image():
+@pytest.mark.asyncio
+async def test_get_content_text_inline_data_single_part():
+  parts = [
+      types.Part.from_bytes(
+          data="Inline text".encode("utf-8"), mime_type="text/plain"
+      )
+  ]
+  content = await _get_content(parts)
+  assert content == "Inline text"
+
+
+@pytest.mark.asyncio
+async def test_get_content_text_inline_data_multiple_parts():
+  parts = [
+      types.Part.from_bytes(
+          data="First part".encode("utf-8"), mime_type="text/plain"
+      ),
+      types.Part.from_text(text="Second part"),
+  ]
+  content = await _get_content(parts)
+  assert content[0]["type"] == "text"
+  assert content[0]["text"] == "First part"
+  assert content[1]["type"] == "text"
+  assert content[1]["text"] == "Second part"
+
+
+@pytest.mark.asyncio
+async def test_get_content_text_inline_data_fallback_decoding():
+  parts = [
+      types.Part.from_bytes(data=b"\xff", mime_type="text/plain"),
+  ]
+  content = await _get_content(parts)
+  assert content == "ÿ"
+
+
+@pytest.mark.asyncio
+async def test_get_content_image():
   parts = [
       types.Part.from_bytes(data=b"test_image_data", mime_type="image/png")
   ]
-  content = _get_content(parts)
+  content = await _get_content(parts)
   assert content[0]["type"] == "image_url"
   assert (
       content[0]["image_url"]["url"]
@@ -1490,11 +1711,12 @@ def test_get_content_image():
   assert "format" not in content[0]["image_url"]
 
 
-def test_get_content_video():
+@pytest.mark.asyncio
+async def test_get_content_video():
   parts = [
       types.Part.from_bytes(data=b"test_video_data", mime_type="video/mp4")
   ]
-  content = _get_content(parts)
+  content = await _get_content(parts)
   assert content[0]["type"] == "video_url"
   assert (
       content[0]["video_url"]["url"]
@@ -1503,31 +1725,34 @@ def test_get_content_video():
   assert "format" not in content[0]["video_url"]
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "file_data,mime_type,expected_base64", FILE_BYTES_TEST_CASES
 )
-def test_get_content_file_bytes(file_data, mime_type, expected_base64):
+async def test_get_content_file_bytes(file_data, mime_type, expected_base64):
   parts = [types.Part.from_bytes(data=file_data, mime_type=mime_type)]
-  content = _get_content(parts)
+  content = await _get_content(parts)
   assert content[0]["type"] == "file"
   assert content[0]["file"]["file_data"] == expected_base64
   assert "format" not in content[0]["file"]
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("file_uri,mime_type", FILE_URI_TEST_CASES)
-def test_get_content_file_uri(file_uri, mime_type):
+async def test_get_content_file_uri(file_uri, mime_type):
   parts = [types.Part.from_uri(file_uri=file_uri, mime_type=mime_type)]
-  content = _get_content(parts)
+  content = await _get_content(parts)
   assert content[0]["type"] == "file"
   assert content[0]["file"]["file_id"] == file_uri
   assert "format" not in content[0]["file"]
 
 
-def test_get_content_audio():
+@pytest.mark.asyncio
+async def test_get_content_audio():
   parts = [
       types.Part.from_bytes(data=b"test_audio_data", mime_type="audio/mpeg")
   ]
-  content = _get_content(parts)
+  content = await _get_content(parts)
   assert content[0]["type"] == "audio_url"
   assert (
       content[0]["audio_url"]["url"]
@@ -1544,7 +1769,7 @@ def test_to_litellm_role():
 
 
 @pytest.mark.parametrize(
-    "response, expected_chunks, expected_finished",
+    "response, expected_chunks, expected_usage_chunk, expected_finished",
     [
         (
             ModelResponse(
@@ -1556,12 +1781,10 @@ def test_to_litellm_role():
                     }
                 ]
             ),
-            [
-                TextChunk(text="this is a test"),
-                UsageMetadataChunk(
-                    prompt_tokens=0, completion_tokens=0, total_tokens=0
-                ),
-            ],
+            [TextChunk(text="this is a test")],
+            UsageMetadataChunk(
+                prompt_tokens=0, completion_tokens=0, total_tokens=0
+            ),
             "stop",
         ),
         (
@@ -1579,12 +1802,10 @@ def test_to_litellm_role():
                     "total_tokens": 8,
                 },
             ),
-            [
-                TextChunk(text="this is a test"),
-                UsageMetadataChunk(
-                    prompt_tokens=3, completion_tokens=5, total_tokens=8
-                ),
-            ],
+            [TextChunk(text="this is a test")],
+            UsageMetadataChunk(
+                prompt_tokens=3, completion_tokens=5, total_tokens=8
+            ),
             "stop",
         ),
         (
@@ -1609,52 +1830,121 @@ def test_to_litellm_role():
                     )
                 ]
             ),
-            [
-                FunctionChunk(id="1", name="test_function", args='{"key": "va'),
-                UsageMetadataChunk(
-                    prompt_tokens=0, completion_tokens=0, total_tokens=0
-                ),
-            ],
+            [FunctionChunk(id="1", name="test_function", args='{"key": "va')],
+            UsageMetadataChunk(
+                prompt_tokens=0, completion_tokens=0, total_tokens=0
+            ),
             None,
         ),
         (
             ModelResponse(choices=[{"finish_reason": "tool_calls"}]),
-            [
-                None,
-                UsageMetadataChunk(
-                    prompt_tokens=0, completion_tokens=0, total_tokens=0
-                ),
-            ],
+            [None],
+            UsageMetadataChunk(
+                prompt_tokens=0, completion_tokens=0, total_tokens=0
+            ),
             "tool_calls",
         ),
         (
             ModelResponse(choices=[{}]),
+            [None],
+            UsageMetadataChunk(
+                prompt_tokens=0, completion_tokens=0, total_tokens=0
+            ),
+            "stop",
+        ),
+        (
+            ModelResponse(
+                choices=[{
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "role": "assistant",
+                        "content": (
+                            '{"id":"call_1","name":"get_current_time",'
+                            '"arguments":{"timezone_str":"Asia/Taipei"}}'
+                        ),
+                    },
+                }],
+                usage={
+                    "prompt_tokens": 7,
+                    "completion_tokens": 9,
+                    "total_tokens": 16,
+                },
+            ),
             [
-                None,
-                UsageMetadataChunk(
-                    prompt_tokens=0, completion_tokens=0, total_tokens=0
+                FunctionChunk(
+                    id="call_1",
+                    name="get_current_time",
+                    args='{"timezone_str": "Asia/Taipei"}',
+                    index=0,
                 ),
             ],
-            "stop",
+            UsageMetadataChunk(
+                prompt_tokens=7, completion_tokens=9, total_tokens=16
+            ),
+            "tool_calls",
+        ),
+        (
+            ModelResponse(
+                choices=[{
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "role": "assistant",
+                        "content": (
+                            'Intro {"id":"call_2","name":"alpha",'
+                            '"arguments":{"foo":"bar"}} wrap'
+                        ),
+                    },
+                }],
+                usage={
+                    "prompt_tokens": 11,
+                    "completion_tokens": 13,
+                    "total_tokens": 24,
+                },
+            ),
+            [
+                TextChunk(text="Intro  wrap"),
+                FunctionChunk(
+                    id="call_2",
+                    name="alpha",
+                    args='{"foo": "bar"}',
+                    index=0,
+                ),
+            ],
+            UsageMetadataChunk(
+                prompt_tokens=11, completion_tokens=13, total_tokens=24
+            ),
+            "tool_calls",
         ),
     ],
 )
-def test_model_response_to_chunk(response, expected_chunks, expected_finished):
+def test_model_response_to_chunk(
+    response, expected_chunks, expected_usage_chunk, expected_finished
+):
   result = list(_model_response_to_chunk(response))
-  assert len(result) == 2
-  chunk, finished = result[0]
-  if expected_chunks:
-    assert isinstance(chunk, type(expected_chunks[0]))
-    assert chunk == expected_chunks[0]
-  else:
-    assert chunk is None
-  assert finished == expected_finished
+  observed_chunks = []
+  usage_chunk = None
+  for chunk, finished in result:
+    if isinstance(chunk, UsageMetadataChunk):
+      usage_chunk = chunk
+      continue
+    observed_chunks.append((chunk, finished))
 
-  usage_chunk, _ = result[1]
-  assert usage_chunk is not None
-  assert usage_chunk.prompt_tokens == expected_chunks[1].prompt_tokens
-  assert usage_chunk.completion_tokens == expected_chunks[1].completion_tokens
-  assert usage_chunk.total_tokens == expected_chunks[1].total_tokens
+  assert len(observed_chunks) == len(expected_chunks)
+  for (chunk, finished), expected_chunk in zip(
+      observed_chunks, expected_chunks
+  ):
+    if expected_chunk is None:
+      assert chunk is None
+    else:
+      assert isinstance(chunk, type(expected_chunk))
+      assert chunk == expected_chunk
+    assert finished == expected_finished
+
+  if expected_usage_chunk is None:
+    assert usage_chunk is None
+  else:
+    assert usage_chunk is not None
+    assert usage_chunk == expected_usage_chunk
 
 
 @pytest.mark.asyncio
@@ -2114,7 +2404,7 @@ async def test_generate_content_async_stream_with_empty_chunk(
 
 
 @pytest.mark.asyncio
-def test_get_completion_inputs_generation_params():
+async def test_get_completion_inputs_generation_params():
   # Test that generation_params are extracted and mapped correctly
   req = LlmRequest(
       contents=[
@@ -2130,9 +2420,8 @@ def test_get_completion_inputs_generation_params():
           frequency_penalty=0.2,
       ),
   )
-  from google.adk.models.lite_llm import _get_completion_inputs
 
-  _, _, _, generation_params = _get_completion_inputs(req)
+  _, _, _, generation_params = await _get_completion_inputs(req)
   assert generation_params["temperature"] == 0.33
   assert generation_params["max_completion_tokens"] == 123
   assert generation_params["top_p"] == 0.88
@@ -2146,7 +2435,7 @@ def test_get_completion_inputs_generation_params():
 
 
 @pytest.mark.asyncio
-def test_get_completion_inputs_empty_generation_params():
+async def test_get_completion_inputs_empty_generation_params():
   # Test that generation_params is None when no generation parameters are set
   req = LlmRequest(
       contents=[
@@ -2154,14 +2443,13 @@ def test_get_completion_inputs_empty_generation_params():
       ],
       config=types.GenerateContentConfig(),
   )
-  from google.adk.models.lite_llm import _get_completion_inputs
 
-  _, _, _, generation_params = _get_completion_inputs(req)
+  _, _, _, generation_params = await _get_completion_inputs(req)
   assert generation_params is None
 
 
 @pytest.mark.asyncio
-def test_get_completion_inputs_minimal_config():
+async def test_get_completion_inputs_minimal_config():
   # Test that generation_params is None when config has no generation parameters
   req = LlmRequest(
       contents=[
@@ -2171,14 +2459,13 @@ def test_get_completion_inputs_minimal_config():
           system_instruction="test instruction"  # Non-generation parameter
       ),
   )
-  from google.adk.models.lite_llm import _get_completion_inputs
 
-  _, _, _, generation_params = _get_completion_inputs(req)
+  _, _, _, generation_params = await _get_completion_inputs(req)
   assert generation_params is None
 
 
 @pytest.mark.asyncio
-def test_get_completion_inputs_partial_generation_params():
+async def test_get_completion_inputs_partial_generation_params():
   # Test that generation_params is correctly built even with only some parameters
   req = LlmRequest(
       contents=[
@@ -2189,9 +2476,8 @@ def test_get_completion_inputs_partial_generation_params():
           # Only temperature is set, others are None/default
       ),
   )
-  from google.adk.models.lite_llm import _get_completion_inputs
 
-  _, _, _, generation_params = _get_completion_inputs(req)
+  _, _, _, generation_params = await _get_completion_inputs(req)
   assert generation_params is not None
   assert generation_params["temperature"] == 0.7
   # Should only contain the temperature parameter
@@ -2412,3 +2698,184 @@ async def test_finish_reason_unknown_maps_to_other(
     assert response.finish_reason == types.FinishReason.OTHER
 
   mock_acompletion.assert_called_once()
+
+
+# Tests for provider detection and file_id support
+
+
+@pytest.mark.parametrize(
+    "model_string, expected_provider",
+    [
+        # Standard provider/model format
+        ("openai/gpt-4o", "openai"),
+        ("azure/gpt-4", "azure"),
+        ("groq/llama3-70b", "groq"),
+        ("anthropic/claude-3", "anthropic"),
+        ("vertex_ai/gemini-pro", "vertex_ai"),
+        # Fallback heuristics
+        ("gpt-4o", "openai"),
+        ("o1-preview", "openai"),
+        ("azure-gpt-4", "azure"),
+        # Unknown models
+        ("custom-model", ""),
+        ("", ""),
+        (None, ""),
+    ],
+)
+def test_get_provider_from_model(model_string, expected_provider):
+  """Test provider extraction from model strings."""
+  assert _get_provider_from_model(model_string) == expected_provider
+
+
+@pytest.mark.parametrize(
+    "provider, expected_in_list",
+    [
+        ("openai", True),
+        ("azure", True),
+        ("anthropic", False),
+        ("vertex_ai", False),
+    ],
+)
+def test_file_id_required_providers(provider, expected_in_list):
+  """Test that the correct providers require file_id."""
+  assert (provider in _FILE_ID_REQUIRED_PROVIDERS) == expected_in_list
+
+
+@pytest.mark.asyncio
+async def test_get_content_pdf_openai_uses_file_id(mocker):
+  """Test that PDF files use file_id for OpenAI provider."""
+  mock_file_response = mocker.create_autospec(litellm.FileObject)
+  mock_file_response.id = "file-abc123"
+  mock_acreate_file = AsyncMock(return_value=mock_file_response)
+  mocker.patch.object(litellm, "acreate_file", new=mock_acreate_file)
+
+  parts = [
+      types.Part.from_bytes(data=b"test_pdf_data", mime_type="application/pdf")
+  ]
+  content = await _get_content(parts, provider="openai")
+
+  assert content[0]["type"] == "file"
+  assert content[0]["file"]["file_id"] == "file-abc123"
+  assert "file_data" not in content[0]["file"]
+
+  mock_acreate_file.assert_called_once_with(
+      file=b"test_pdf_data",
+      purpose="assistants",
+      custom_llm_provider="openai",
+  )
+
+
+@pytest.mark.asyncio
+async def test_get_content_pdf_non_openai_uses_file_data():
+  """Test that PDF files use file_data for non-OpenAI providers."""
+  parts = [
+      types.Part.from_bytes(data=b"test_pdf_data", mime_type="application/pdf")
+  ]
+  content = await _get_content(parts, provider="anthropic")
+
+  assert content[0]["type"] == "file"
+  assert "file_data" in content[0]["file"]
+  assert content[0]["file"]["file_data"].startswith(
+      "data:application/pdf;base64,"
+  )
+  assert "file_id" not in content[0]["file"]
+
+
+@pytest.mark.asyncio
+async def test_get_content_pdf_azure_uses_file_id(mocker):
+  """Test that PDF files use file_id for Azure provider."""
+  mock_file_response = mocker.create_autospec(litellm.FileObject)
+  mock_file_response.id = "file-xyz789"
+  mock_acreate_file = AsyncMock(return_value=mock_file_response)
+  mocker.patch.object(litellm, "acreate_file", new=mock_acreate_file)
+
+  parts = [
+      types.Part.from_bytes(data=b"test_pdf_data", mime_type="application/pdf")
+  ]
+  content = await _get_content(parts, provider="azure")
+
+  assert content[0]["type"] == "file"
+  assert content[0]["file"]["file_id"] == "file-xyz789"
+
+  mock_acreate_file.assert_called_once_with(
+      file=b"test_pdf_data",
+      purpose="assistants",
+      custom_llm_provider="azure",
+  )
+
+
+@pytest.mark.asyncio
+async def test_get_completion_inputs_openai_file_upload(mocker):
+  """Test that _get_completion_inputs uploads files for OpenAI models."""
+  mock_file_response = mocker.create_autospec(litellm.FileObject)
+  mock_file_response.id = "file-uploaded123"
+  mock_acreate_file = AsyncMock(return_value=mock_file_response)
+  mocker.patch.object(litellm, "acreate_file", new=mock_acreate_file)
+
+  pdf_part = types.Part.from_bytes(
+      data=b"test_pdf_content", mime_type="application/pdf"
+  )
+  llm_request = LlmRequest(
+      model="openai/gpt-4o",
+      contents=[
+          types.Content(
+              role="user",
+              parts=[
+                  types.Part.from_text(text="Analyze this PDF"),
+                  pdf_part,
+              ],
+          )
+      ],
+      config=types.GenerateContentConfig(tools=[]),
+  )
+
+  messages, tools, response_format, generation_params = (
+      await _get_completion_inputs(llm_request)
+  )
+
+  assert len(messages) == 1
+  assert messages[0]["role"] == "user"
+  content = messages[0]["content"]
+  assert len(content) == 2
+  assert content[0]["type"] == "text"
+  assert content[0]["text"] == "Analyze this PDF"
+  assert content[1]["type"] == "file"
+  assert content[1]["file"]["file_id"] == "file-uploaded123"
+
+  mock_acreate_file.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_get_completion_inputs_non_openai_no_file_upload(mocker):
+  """Test that _get_completion_inputs does not upload files for non-OpenAI models."""
+  mock_acreate_file = AsyncMock()
+  mocker.patch.object(litellm, "acreate_file", new=mock_acreate_file)
+
+  pdf_part = types.Part.from_bytes(
+      data=b"test_pdf_content", mime_type="application/pdf"
+  )
+  llm_request = LlmRequest(
+      model="anthropic/claude-3-opus",
+      contents=[
+          types.Content(
+              role="user",
+              parts=[
+                  types.Part.from_text(text="Analyze this PDF"),
+                  pdf_part,
+              ],
+          )
+      ],
+      config=types.GenerateContentConfig(tools=[]),
+  )
+
+  messages, tools, response_format, generation_params = (
+      await _get_completion_inputs(llm_request)
+  )
+
+  assert len(messages) == 1
+  content = messages[0]["content"]
+  assert content[1]["type"] == "file"
+  assert "file_data" in content[1]["file"]
+  assert "file_id" not in content[1]["file"]
+
+  mock_acreate_file.assert_not_called()
